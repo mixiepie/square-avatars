@@ -3,9 +3,8 @@
   const { findByProps } = vendetta.metro;
   const { React, ReactNative } = vendetta.metro.common;
   const unpatches = [];
-  const stats = { calls: 0, img: 0, box: 0 };
-  const names = {};
-  const imgSamples = [];
+  const stats = { calls: 0, srcImg: 0, otherAvatar: 0, box: 0 };
+  const samples = {};
   let timer;
 
   const flat = (s) => {
@@ -20,12 +19,25 @@
     for (const k of ["width", "height", "borderRadius", "overflow"]) if (s[k] !== undefined) o[k] = s[k];
     return o;
   };
+  const hasAv = (v) => {
+    if (typeof v === "string") return v.indexOf("avatars/") !== -1;
+    if (Array.isArray(v)) return v.some(hasAv);
+    if (v && typeof v === "object" && typeof v.uri === "string") return v.uri.indexOf("avatars/") !== -1;
+    return false;
+  };
 
-  function isAvatarImage(props) {
-    const src = props.source;
-    const uri = Array.isArray(src) ? src[0] && src[0].uri : src && src.uri;
-    return typeof uri === "string" && uri.indexOf("avatars/") !== -1;
+  // returns "src" for a normal image, or the prop name for any other prop holding an avatar url
+  function avatarKind(props) {
+    if (hasAv(props.source)) return "src";
+    const keys = Object.keys(props);
+    if (keys.length > 40) return null;
+    for (const k of keys) {
+      if (k === "children" || k === "style") continue;
+      if (hasAv(props[k])) return k;
+    }
+    return null;
   }
+
   function isRoundBox(props) {
     const s = flat(props.style);
     return (
@@ -37,18 +49,17 @@
   function fix(args) {
     stats.calls++;
     const props = args[1];
-    const n = nameOf(args[0]);
-    if (/avatar|mask/i.test(n) || (props && props.maskElement)) {
-      if (!names[n] && Object.keys(names).length < 25)
-        names[n] = { keys: props ? Object.keys(props).slice(0, 12) : [], style: props ? short(flat(props.style)) : {} };
-    }
     if (!props || typeof props !== "object") return;
-    const img = isAvatarImage(props);
-    const box = !img && isRoundBox(props);
-    if (img || box) {
-      if (img) {
-        stats.img++;
-        if (imgSamples.length < 4) imgSamples.push({ type: n, style: short(flat(props.style)), keys: Object.keys(props).slice(0, 10) });
+    const kind = avatarKind(props);
+    const box = !kind && isRoundBox(props);
+    if (kind || box) {
+      if (kind === "src") stats.srcImg++;
+      else if (kind) {
+        stats.otherAvatar++;
+        const n = nameOf(args[0]);
+        const id = n + ":" + kind;
+        if (!samples[id] && Object.keys(samples).length < 12)
+          samples[id] = { keys: Object.keys(props).slice(0, 14), style: short(flat(props.style)) };
       } else stats.box++;
       args[1] = { ...props, style: [props.style, { borderRadius: 0 }] };
       return args;
@@ -64,15 +75,14 @@
         const rt = findByProps("jsx", "jsxs");
         if (rt) { unpatches.push(before("jsx", rt, fix)); unpatches.push(before("jsxs", rt, fix)); }
       } catch {}
-      toast("Square Avatars v4 on. Open your DMs, wait 15s");
+      toast("Square Avatars v5 on. Open a chat, scroll, wait 15s");
       timer = setTimeout(() => {
-        const report = JSON.stringify({ stats, imgSamples, names }).slice(0, 3500);
+        const report = JSON.stringify({ stats, samples }).slice(0, 3500);
         try {
-          const cb = findByProps("setString");
-          cb.setString(report);
-          toast("Debug info copied. Paste it in the chat with Claude");
+          findByProps("setString").setString(report);
+          toast("Debug info copied. Paste it to Claude");
         } catch {
-          toast(`Seen ${stats.calls}, avatars ${stats.img}, boxes ${stats.box}`);
+          toast(`Seen ${stats.calls}, img ${stats.srcImg}, other ${stats.otherAvatar}, boxes ${stats.box}`);
         }
       }, 15000);
     },
