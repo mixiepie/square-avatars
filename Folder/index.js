@@ -1,81 +1,75 @@
 (function () {
   const { before, after } = vendetta.patcher;
-  const { findByProps } = vendetta.metro;
-  const { React, ReactNative } = vendetta.metro.common;
+  const { findByProps, findByName } = vendetta.metro;
   const unpatches = [];
 
-  const stripRadius = (style) => {
-    if (!style) return style;
-    if (Array.isArray(style)) return style.map(stripRadius);
-    if (typeof style === "object") {
-      const clean = { ...style };
-      for (const key of Object.keys(clean)) {
-        if (key.toLowerCase().includes("radius")) {
-          clean[key] = 0;
-        }
-      }
-      return clean;
-    }
-    return style;
-  };
+  const fixAvatarProps = (args) => {
+    if (!args || !args[0]) return;
+    const props = args[0];
+    
+    // Disable circular masking on avatar props
+    if ('isCircle' in props) props.isCircle = false;
+    if ('isRound' in props) props.isRound = false;
+    if ('hasMask' in props) props.hasMask = false;
+    if ('cutout' in props) props.cutout = false;
+    if ('borderRadius' in props) props.borderRadius = 0;
 
-  const processProps = (props) => {
-    if (!props || typeof props !== "object") return;
-
-    // Direct style patch
+    // Reset style rounding strictly if it's an avatar wrapper
     if (props.style) {
-      try {
-        const flat = ReactNative.StyleSheet.flatten(props.style);
-        if (flat && (flat.borderRadius || flat.borderBottomLeftRadius)) {
-          props.style = [flat, { borderRadius: 0, borderTopLeftRadius: 0, borderTopRightRadius: 0, borderBottomLeftRadius: 0, borderBottomRightRadius: 0 }];
-        }
-      } catch {}
+      if (Array.isArray(props.style)) {
+        props.style = props.style.map(s => typeof s === 'object' && s ? { ...s, borderRadius: 0 } : s);
+      } else if (typeof props.style === 'object') {
+        props.style = { ...props.style, borderRadius: 0 };
+      }
     }
-
-    // Avatar container / mask patch
-    if (props.avatarStyle) props.avatarStyle = stripRadius(props.avatarStyle);
-    if (props.imageStyle) props.imageStyle = stripRadius(props.imageStyle);
-  };
-
-  const fixArgs = (args) => {
-    if (args && args[1]) processProps(args[1]);
-    return args;
   };
 
   const toast = (t) => { try { vendetta.ui.toasts.showToast(t); } catch {} };
 
   return {
     onLoad() {
-      // 1. Hook into React element creation
-      try { unpatches.push(before("createElement", React, fixArgs)); } catch {}
-      
+      // 1. Target Avatar components directly across Metro modules
       try {
-        const rt = findByProps("jsx", "jsxs");
-        if (rt) {
-          unpatches.push(before("jsx", rt, fixArgs));
-          unpatches.push(before("jsxs", rt, fixArgs));
-        }
-      } catch {}
-
-      // 2. Intercept StyleSheet.flatten to force radius removal on evaluated styles
-      try {
-        const SS = ReactNative.StyleSheet;
-        if (SS && SS.flatten) {
-          unpatches.push(after("flatten", SS, (args, res) => {
-            if (res && (res.borderRadius > 0 || res.borderTopLeftRadius > 0)) {
-              return stripRadius(res);
+        const avatarModules = findByProps("Avatar") || findByProps("getUserAvatarURL");
+        if (avatarModules) {
+          for (const key of Object.keys(avatarModules)) {
+            if (typeof avatarModules[key] === "function") {
+              unpatches.push(before(key, avatarModules, fixAvatarProps));
             }
-            return res;
-          }));
+          }
         }
-      } catch {}
+      } catch (e) {}
 
-      toast("Square Avatars v8 loaded!");
+      // 2. Patch MaskedView (This is what actually clips avatars into circles)
+      try {
+        const MaskedViewModule = findByProps("MaskedView") || findByName("MaskedView", false);
+        if (MaskedViewModule) {
+          const comp = MaskedViewModule.MaskedView || MaskedViewModule.default || MaskedViewModule;
+          if (comp) {
+            unpatches.push(before("render", comp, (args) => {
+              if (args && args[0] && args[0].maskElement) {
+                // Bypass mask rendering for avatars
+                args[0].maskElement = null;
+              }
+            }));
+          }
+        }
+      } catch (e) {}
+
+      // 3. Patch FastImage / Image renderers specifically when handling avatars
+      try {
+        const ImageComponents = findByProps("FastImage") || findByProps("render");
+        if (ImageComponents && ImageComponents.default) {
+          unpatches.push(before("default", ImageComponents, fixAvatarProps));
+        }
+      } catch (e) {}
+
+      toast("Square Avatars v9 applied!");
     },
 
     onUnload() {
       unpatches.forEach((u) => { try { u(); } catch {} });
-      toast("Square Avatars v8 unloaded");
+      toast("Square Avatars v9 unloaded");
     }
   };
 })();
