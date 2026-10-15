@@ -3,6 +3,6 @@
   "description": "Makes profile pictures square instead of round.",
   "authors": [{ "name": "mixiepie" }],
   "main": "index.js",
-  "hash": "v7",
+  "hash": "v8",
   "vendetta": { "icon": "ic_image" }
 }
