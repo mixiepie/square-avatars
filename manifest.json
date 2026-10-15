@@ -1,0 +1,7 @@
+{
+  "name": "Square Avatars",
+  "description": "Makes profile pictures square instead of round.",
+  "authors": [{ "name": "You" }],
+  "main": "index.js",
+  "vendetta": { "icon": "ic_image" }
+}
