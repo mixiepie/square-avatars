@@ -1,87 +1,70 @@
 (function () {
-  const { before } = vendetta.patcher;
-  const { findByProps } = vendetta.metro;
-  const { React, ReactNative } = vendetta.metro.common;
+  const { after, before } = vendetta.patcher;
+  const { findByProps, findByDisplayName } = vendetta.metro;
   const unpatches = [];
-  const stats = { calls: 0, matched: 0, box: 0 };
-  const samples = {};
-  let timer;
 
-  const flat = (s) => {
-    try { return ReactNative.StyleSheet.flatten(s) || {}; } catch { return {}; }
-  };
-  
-  const nameOf = (t) => {
-    if (typeof t === "string") return t;
-    return (t && (t.displayName || t.name || (t.type && (t.type.displayName || t.type.name)) || (t.render && t.render.name))) || "?";
+  const fixStyle = (style) => {
+    if (!style) return style;
+    if (Array.isArray(style)) return style.map(fixStyle);
+    if (typeof style === "object") {
+      return { ...style, borderRadius: 0, borderTopLeftRadius: 0, borderTopRightRadius: 0, borderBottomLeftRadius: 0, borderBottomRightRadius: 0 };
+    }
+    return style;
   };
 
-  // Broader check for Discord CDN / avatar links
-  const hasAv = (v) => {
-    if (typeof v === "string") return v.includes("discordapp.com/avatars") || v.includes("discord.com/avatars") || v.includes("guilds/") || v.includes("users/");
-    if (Array.isArray(v)) return v.some(hasAv);
-    if (v && typeof v === "object" && typeof v.uri === "string") {
-      return v.uri.includes("avatars") || v.uri.includes("guilds") || v.uri.includes("users");
-    }
-    return false;
+  const patchProps = (args) => {
+    if (!args[0]) return;
+    const props = args[0];
+    if (props.style) props.style = fixStyle(props.style);
+    if (props.imageStyle) props.imageStyle = fixStyle(props.imageStyle);
+    if (props.avatarStyle) props.avatarStyle = fixStyle(props.avatarStyle);
   };
-
-  function fix(args) {
-    stats.calls++;
-    const props = args[1];
-    if (!props || typeof props !== "object") return;
-
-    let isAvatar = hasAv(props.source);
-    if (!isAvatar) {
-      // Check other common image props just in case
-      for (const k of ["src", "uri", "avatar", "icon"]) {
-        if (hasAv(props[k])) { isAvatar = true; break; }
-      }
-    }
-
-    const s = flat(props.style);
-    const isRound = typeof s.width === "number" && s.width === s.height && s.width >= 16 &&
-                    typeof s.borderRadius === "number" && s.borderRadius >= s.width / 2;
-
-    if (isAvatar || isRound) {
-      if (isAvatar) {
-        stats.matched++;
-        const n = nameOf(args[0]);
-        if (!samples[n] && Object.keys(samples).length < 10) {
-          samples[n] = { keys: Object.keys(props), style: { width: s.width, height: s.height, borderRadius: s.borderRadius } };
-        }
-      } else {
-        stats.box++;
-      }
-
-      args[1] = { ...props, style: [props.style, { borderRadius: 0 }] };
-      return args;
-    }
-  }
 
   const toast = (t) => { try { vendetta.ui.toasts.showToast(t); } catch {} };
 
   return {
     onLoad() {
-      try { unpatches.push(before("createElement", React, fix)); } catch {}
+      // 1. Try patching common Avatar components directly
       try {
-        const rt = findByProps("jsx", "jsxs");
-        if (rt) { unpatches.push(before("jsx", rt, fix)); unpatches.push(before("jsxs", rt, fix)); }
-      } catch {}
-      toast("Square Avatars v6 on. Scroll chat for 15s");
-      timer = setTimeout(() => {
-        const report = JSON.stringify({ stats, samples }).slice(0, 3500);
-        try {
-          findByProps("setString").setString(report);
-          toast("v6 debug copied! Paste it here.");
-        } catch {
-          toast(`Matched: ${stats.matched}, Boxes: ${stats.box}`);
+        const AvatarModule = findByProps("Avatar", "getAvatarSource") || findByProps("getUserAvatarURL");
+        if (AvatarModule) {
+          if (AvatarModule.default) unpatches.push(before("default", AvatarModule, patchProps));
+          if (AvatarModule.Avatar) unpatches.push(before("Avatar", AvatarModule, patchProps));
         }
-      }, 15000);
+      } catch (e) {}
+
+      // 2. Patch Image / FastImage components directly for borderRadius override
+      try {
+        const ImageWrapper = findByProps("render", "displayName");
+        const FastImage = findByProps("FastImage")?.FastImage || findByProps("src", "source");
+        
+        [ImageWrapper, FastImage].forEach((comp) => {
+          if (comp && comp.render) {
+            unpatches.push(before("render", comp, patchProps));
+          }
+        });
+      } catch (e) {}
+
+      // 3. Optional fallback: Override global StyleSheet.create to disable round borders on avatar classes
+      try {
+        const StyleSheet = vendetta.metro.common.ReactNative.StyleSheet;
+        unpatches.push(before("create", StyleSheet, (args) => {
+          const styles = args[0];
+          if (!styles) return;
+          for (const key in styles) {
+            if (key.toLowerCase().includes("avatar") || key.toLowerCase().includes("round")) {
+              if (styles[key].borderRadius) styles[key].borderRadius = 0;
+            }
+          }
+        }));
+      } catch (e) {}
+
+      toast("Square Avatars v7 applied!");
     },
+
     onUnload() {
-      clearTimeout(timer);
       unpatches.forEach((u) => { try { u(); } catch {} });
-    },
+      toast("Square Avatars v7 unloaded");
+    }
   };
 })();
