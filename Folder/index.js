@@ -1,10 +1,12 @@
 (function () {
-  const { before } = vendetta.patcher;
+  const { before, after } = vendetta.patcher;
   const { findByProps } = vendetta.metro;
   const { React, ReactNative } = vendetta.metro.common;
   const unpatches = [];
   const stats = { calls: 0, srcImg: 0, otherAvatar: 0, box: 0 };
   const samples = {};
+  const restore = [];
+  const info = {};
   let timer;
 
   const flat = (s) => {
@@ -91,6 +93,54 @@
     return found;
   }
 
+
+  function squareUp(node, depth) {
+    if (!node || typeof node !== "object" || depth > 8) return;
+    if (Array.isArray(node)) { node.forEach((n) => squareUp(n, depth + 1)); return; }
+    const p = node.props;
+    if (!p || typeof p !== "object") return;
+    try {
+      const st = flat(p.style);
+      const tiny = typeof st.width === "number" && st.width < 20;
+      if (!tiny) p.style = [p.style, { borderRadius: 0 }];
+    } catch {}
+    squareUp(p.children, depth + 1);
+    if (p.maskElement) squareUp(p.maskElement, depth + 1);
+  }
+
+  function patchComp(holder, key, label) {
+    try {
+      const t = holder[key];
+      const wrap = (_a, res) => { squareUp(res, 0); return res; };
+      if (typeof t === "function") { unpatches.push(after(key, holder, wrap)); info[label] = "fn"; }
+      else if (t && t.type && typeof t.type.render === "function") { unpatches.push(after("render", t.type, wrap)); info[label] = "memo-fwd"; }
+      else if (t && typeof t.type === "function") { unpatches.push(after("type", t, wrap)); info[label] = "memo"; }
+      else if (t && typeof t.render === "function") { unpatches.push(after("render", t, wrap)); info[label] = "fwd"; }
+      else info[label] = typeof t;
+    } catch (e) { info[label] = "err " + String(e).slice(0, 60); }
+  }
+
+  function setupAvatarModule() {
+    try {
+      const m = findByProps("CutoutableAvatarImage");
+      if (!m) { info.module = "not found"; return; }
+      patchComp(m, "Avatar", "Avatar");
+      patchComp(m, "CutoutableAvatarImage", "Cutoutable");
+      const st = m.avatarStyles;
+      if (st && typeof st === "object") {
+        info.styles = {};
+        for (const k of Object.keys(st).slice(0, 10)) {
+          const v = st[k];
+          if (v && typeof v === "object" && typeof v.borderRadius === "number") {
+            info.styles[k] = v.borderRadius;
+            const orig = v.borderRadius;
+            try { v.borderRadius = 0; restore.push(() => { v.borderRadius = orig; }); } catch {}
+          } else info.styles[k] = typeof v;
+        }
+      } else info.styles = typeof st;
+    } catch (e) { info.module = "err " + String(e).slice(0, 80); }
+  }
+
   const toast = (t) => { try { vendetta.ui.toasts.showToast(t); } catch {} };
 
   return {
@@ -100,9 +150,10 @@
         const rt = findByProps("jsx", "jsxs");
         if (rt) { unpatches.push(before("jsx", rt, fix)); unpatches.push(before("jsxs", rt, fix)); }
       } catch {}
-      toast("Square Avatars v6 on. Open a chat, scroll, wait 15s");
+      setupAvatarModule();
+      toast("Square Avatars v7 on. Open a chat, scroll, wait 15s");
       timer = setTimeout(() => {
-        const report = JSON.stringify({ stats, samples, mods: scanModules() }).slice(0, 3500);
+        const report = JSON.stringify({ stats, info }).slice(0, 3500);
         try {
           findByProps("setString").setString(report);
           toast("Debug info copied. Paste it to Claude");
@@ -114,6 +165,7 @@
     onUnload() {
       clearTimeout(timer);
       unpatches.forEach((u) => { try { u(); } catch {} });
+      restore.forEach((r) => { try { r(); } catch {} });
     },
   };
 })();
