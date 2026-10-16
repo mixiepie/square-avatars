@@ -47,7 +47,8 @@
     return false;
   }
 
-  // Looks like a circle: square box with full rounding, or an image filling a rounded parent
+  // Looks like a circle clip: square box fully rounded, image filling a rounded parent,
+  // a rounded overflow-hidden clip, or an element whose style is only a radius
   function isRound(props) {
     const s = flat(props.style);
     const br = typeof s.borderRadius === "number" ? s.borderRadius
@@ -55,8 +56,11 @@
     if (br < 14) return false;
     const w = s.width, h = s.height;
     if (typeof w === "number" && w === h && w >= 16 && br >= w / 2) return true;
+    if (br > 40) return false;
     if (w === "100%" && h === "100%") return true;
-    return false;
+    if (s.overflow === "hidden") return true;
+    const other = Object.keys(s).filter((k) => k !== "borderRadius");
+    return other.length === 0;
   }
 
   function squareProps(props, withBorderRadiusProp) {
@@ -83,7 +87,7 @@
     const s = flat(props.style);
     if (typeof s.borderRadius === "number" && s.borderRadius >= 14 && Object.keys(missed).length < 10) {
       const n = nameOf(args[0]);
-      if (!missed[n]) missed[n] = short(s);
+      if (!missed[n]) missed[n] = Object.assign(short(s), { k: Object.keys(s).slice(0, 8) });
     }
   }
 
@@ -150,7 +154,7 @@
         if (rt) { unpatches.push(before("jsx", rt, fix)); unpatches.push(before("jsxs", rt, fix)); }
       } catch {}
       setupAvatarModule();
-      toast("Square Avatars v8 on. Open a chat, scroll, wait 15s");
+      toast("Square Avatars v9 on. Open a chat, scroll, wait 15s");
       timer = setTimeout(() => {
         const report = JSON.stringify({ stats, matchedTypes, missed, info }).slice(0, 3500);
         try {
