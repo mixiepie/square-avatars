@@ -3,11 +3,20 @@
   const { findByProps } = vendetta.metro;
   const { React, ReactNative } = vendetta.metro.common;
   const unpatches = [];
-  const stats = { calls: 0, srcImg: 0, otherAvatar: 0, box: 0 };
-  const samples = {};
   const restore = [];
   const info = {};
+  const stats = { calls: 0, srcImg: 0, round: 0 };
+  const matchedTypes = {};
+  const missed = {};
   let timer;
+
+  const ZERO = {
+    borderRadius: 0,
+    borderTopLeftRadius: 0,
+    borderTopRightRadius: 0,
+    borderBottomLeftRadius: 0,
+    borderBottomRightRadius: 0,
+  };
 
   const flat = (s) => {
     try { return ReactNative.StyleSheet.flatten(s) || {}; } catch { return {}; }
@@ -27,72 +36,56 @@
     if (v && typeof v === "object" && typeof v.uri === "string") return v.uri.indexOf("avatars/") !== -1;
     return false;
   };
-
-  // returns "src" for a normal image, or the prop name for any other prop holding an avatar url
-  function avatarKind(props) {
-    if (hasAv(props.source)) return "src";
+  function hasAvatarUrl(props) {
+    if (hasAv(props.source)) return true;
     const keys = Object.keys(props);
-    if (keys.length > 40) return null;
+    if (keys.length > 40) return false;
     for (const k of keys) {
       if (k === "children" || k === "style") continue;
-      if (hasAv(props[k])) return k;
+      if (hasAv(props[k])) return true;
     }
-    return null;
+    return false;
   }
 
-  function isRoundBox(props) {
+  // Looks like a circle: square box with full rounding, or an image filling a rounded parent
+  function isRound(props) {
     const s = flat(props.style);
-    return (
-      typeof s.width === "number" && s.width === s.height && s.width >= 28 &&
-      typeof s.borderRadius === "number" && s.borderRadius >= s.width / 2
-    );
+    const br = typeof s.borderRadius === "number" ? s.borderRadius
+      : typeof props.borderRadius === "number" ? props.borderRadius : 0;
+    if (br < 14) return false;
+    const w = s.width, h = s.height;
+    if (typeof w === "number" && w === h && w >= 16 && br >= w / 2) return true;
+    if (w === "100%" && h === "100%") return true;
+    return false;
+  }
+
+  function squareProps(props, withBorderRadiusProp) {
+    const np = { ...props, style: [props.style, ZERO] };
+    if (withBorderRadiusProp || "borderRadius" in props) np.borderRadius = 0;
+    if ("imageStyle" in props) np.imageStyle = [props.imageStyle, ZERO];
+    return np;
   }
 
   function fix(args) {
     stats.calls++;
     const props = args[1];
     if (!props || typeof props !== "object") return;
-    const kind = avatarKind(props);
-    const box = !kind && isRoundBox(props);
-    if (kind || box) {
-      if (kind === "src") stats.srcImg++;
-      else if (kind) {
-        stats.otherAvatar++;
-        const n = nameOf(args[0]);
-        const id = n + ":" + kind;
-        if (!samples[id] && Object.keys(samples).length < 12)
-          samples[id] = { keys: Object.keys(props).slice(0, 14), style: short(flat(props.style)) };
-      } else stats.box++;
-      args[1] = { ...props, style: [props.style, { borderRadius: 0 }] };
+    const avatar = hasAvatarUrl(props);
+    const round = !avatar && isRound(props);
+    if (avatar || round) {
+      const n = nameOf(args[0]);
+      if (avatar) stats.srcImg++; else stats.round++;
+      matchedTypes[n] = (matchedTypes[n] || 0) + 1;
+      args[1] = squareProps(props, avatar);
       return args;
     }
+    // record rounded things we did NOT catch, to learn from
+    const s = flat(props.style);
+    if (typeof s.borderRadius === "number" && s.borderRadius >= 14 && Object.keys(missed).length < 10) {
+      const n = nameOf(args[0]);
+      if (!missed[n]) missed[n] = short(s);
+    }
   }
-
-
-  function scanModules() {
-    const found = {};
-    try {
-      const mods = vendetta.metro.modules;
-      for (const id in mods) {
-        let ex;
-        try { ex = mods[id].publicModule && mods[id].publicModule.exports; } catch { continue; }
-        if (!ex || (typeof ex !== "object" && typeof ex !== "function")) continue;
-        let keys = [];
-        try { keys = Object.keys(ex); } catch { continue; }
-        if (keys.length > 200) continue;
-        for (const k of keys) {
-          if (/avatar/i.test(k) && Object.keys(found).length < 40) found[k] = id;
-        }
-        try {
-          const d = ex.default;
-          const dn = d && (d.displayName || d.name);
-          if (typeof dn === "string" && /avatar/i.test(dn) && Object.keys(found).length < 40) found["default:" + dn] = id;
-        } catch {}
-      }
-    } catch (e) { found.error = String(e).slice(0, 80); }
-    return found;
-  }
-
 
   function squareUp(node, depth) {
     if (!node || typeof node !== "object" || depth > 8) return;
@@ -101,8 +94,12 @@
     if (!p || typeof p !== "object") return;
     try {
       const st = flat(p.style);
-      const tiny = typeof st.width === "number" && st.width < 20;
-      if (!tiny) p.style = [p.style, { borderRadius: 0 }];
+      const tiny = typeof st.width === "number" && st.width < 16;
+      if (!tiny) {
+        p.style = [p.style, ZERO];
+        if ("borderRadius" in p) p.borderRadius = 0;
+        if ("imageStyle" in p) p.imageStyle = [p.imageStyle, ZERO];
+      }
     } catch {}
     squareUp(p.children, depth + 1);
     if (p.maskElement) squareUp(p.maskElement, depth + 1);
@@ -128,16 +125,18 @@
       patchComp(m, "CutoutableAvatarImage", "Cutoutable");
       const st = m.avatarStyles;
       if (st && typeof st === "object") {
-        info.styles = {};
-        for (const k of Object.keys(st).slice(0, 10)) {
+        for (const k of Object.keys(st)) {
           const v = st[k];
-          if (v && typeof v === "object" && typeof v.borderRadius === "number") {
-            info.styles[k] = v.borderRadius;
-            const orig = v.borderRadius;
-            try { v.borderRadius = 0; restore.push(() => { v.borderRadius = orig; }); } catch {}
-          } else info.styles[k] = typeof v;
+          if (v && typeof v === "object") {
+            for (const key of Object.keys(ZERO)) {
+              if (typeof v[key] === "number") {
+                const orig = v[key];
+                try { v[key] = 0; restore.push(() => { v[key] = orig; }); } catch {}
+              }
+            }
+          }
         }
-      } else info.styles = typeof st;
+      }
     } catch (e) { info.module = "err " + String(e).slice(0, 80); }
   }
 
@@ -151,14 +150,14 @@
         if (rt) { unpatches.push(before("jsx", rt, fix)); unpatches.push(before("jsxs", rt, fix)); }
       } catch {}
       setupAvatarModule();
-      toast("Square Avatars v7 on. Open a chat, scroll, wait 15s");
+      toast("Square Avatars v8 on. Open a chat, scroll, wait 15s");
       timer = setTimeout(() => {
-        const report = JSON.stringify({ stats, info }).slice(0, 3500);
+        const report = JSON.stringify({ stats, matchedTypes, missed, info }).slice(0, 3500);
         try {
           findByProps("setString").setString(report);
           toast("Debug info copied. Paste it to Claude");
         } catch {
-          toast(`Seen ${stats.calls}, img ${stats.srcImg}, other ${stats.otherAvatar}, boxes ${stats.box}`);
+          toast(`Seen ${stats.calls}, avatars ${stats.srcImg}, round ${stats.round}`);
         }
       }, 15000);
     },
