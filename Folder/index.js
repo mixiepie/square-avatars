@@ -1,9 +1,11 @@
 (function () {
   const { before, after } = vendetta.patcher;
-  const { findByProps, findByName } = vendetta.metro;
+  const { findByProps } = vendetta.metro;
   const { React, ReactNative } = vendetta.metro.common;
   const unpatches = [];
   const restore = [];
+  const seen = {};
+  let timer;
 
   const ZERO = {
     borderRadius: 0,
@@ -45,6 +47,18 @@
     const props = args[1];
     if (!props || typeof props !== "object") return;
     const avatar = hasAvatarUrl(props);
+    if (avatar) {
+      try {
+        const st0 = flat(props.style);
+        const key = st0.width + "x" + st0.height;
+        if (!seen[key] && Object.keys(seen).length < 8) {
+          seen[key] = new Error().stack
+            .split("\n").slice(2, 10)
+            .map((l) => ((l.match(/at\s+([^\s(]+)/) || [0, l.trim()])[1]).slice(0, 40))
+            .join(" < ");
+        }
+      } catch {}
+    }
     if (avatar || isRoundBox(props)) {
       const np = { ...props, style: [props.style, ZERO] };
       if (avatar || "borderRadius" in props) np.borderRadius = 0;
@@ -104,6 +118,46 @@
     } catch {}
   }
 
+
+  // ---- diagnostic: look at what JS hands to the native chat list ----
+  const rowSamples = {};
+  let chatMethods = [];
+  function describe(v, d) {
+    if (v === null) return "null";
+    if (typeof v === "string") return "s";
+    if (typeof v === "number" || typeof v === "boolean") return v;
+    if (Array.isArray(v)) return d > 2 ? "[..]" : v.slice(0, 2).map((x) => describe(x, d + 1));
+    if (typeof v === "object") {
+      if (d > 3) return "{..}";
+      const o = {};
+      for (const k of Object.keys(v).slice(0, 40)) o[k] = describe(v[k], d + 1);
+      return o;
+    }
+    return typeof v;
+  }
+  function watchRows(args) {
+    try {
+      for (const a of args) {
+        if (typeof a !== "string" || a.charAt(0) !== "[") continue;
+        const rows = JSON.parse(a);
+        for (const r of rows) {
+          const t = String(r && r.type);
+          if (!rowSamples[t] && Object.keys(rowSamples).length < 3) rowSamples[t] = describe(r, 0);
+        }
+      }
+    } catch {}
+  }
+  function setupChatWatch() {
+    try {
+      const m = ReactNative.NativeModules.DCDChatManager;
+      if (!m) { chatMethods = ["no DCDChatManager"]; return; }
+      chatMethods = Object.keys(m).slice(0, 30);
+      for (const name of ["updateRows", "createRows"]) {
+        if (typeof m[name] === "function") unpatches.push(before(name, m, (args) => { watchRows(args); }));
+      }
+    } catch (e) { chatMethods = ["err " + String(e).slice(0, 60)]; }
+  }
+
   return {
     onLoad() {
       try { unpatches.push(before("createElement", React, fix)); } catch {}
@@ -112,16 +166,18 @@
         if (rt) { unpatches.push(before("jsx", rt, fix)); unpatches.push(before("jsxs", rt, fix)); }
       } catch {}
       setupAvatarModule();
-      const hits = [];
-      for (const n of ["MessageAvatar", "ChatMessageAvatar", "MessageHeaderAvatar", "ReplyAvatar", "UserAvatar"]) {
+      setupChatWatch();
+      try { vendetta.ui.toasts.showToast("Square Avatars: open a chat, wait 15s"); } catch {}
+      timer = setTimeout(() => {
+        const report = JSON.stringify({ chatMethods, rowSamples, seen }).slice(0, 3800);
         try {
-          const m = findByName(n, false);
-          if (m) { patchComp(m, "default"); hits.push(n); }
+          findByProps("setString").setString(report);
+          vendetta.ui.toasts.showToast("Report copied. Paste it to Claude");
         } catch {}
-      }
-      try { vendetta.ui.toasts.showToast("Square Avatars found: " + (hits.join(", ") || "none")); } catch {}
+      }, 15000);
     },
     onUnload() {
+      clearTimeout(timer);
       unpatches.forEach((u) => { try { u(); } catch {} });
       restore.forEach((r) => { try { r(); } catch {} });
     },
