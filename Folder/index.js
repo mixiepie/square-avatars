@@ -1,10 +1,9 @@
 (function () {
   const { before, after } = vendetta.patcher;
-  const { findByProps } = vendetta.metro;
+  const { findByProps, findByName } = vendetta.metro;
   const { React, ReactNative } = vendetta.metro.common;
   const unpatches = [];
   const restore = [];
-  const seen = {};
   let timer;
 
   const ZERO = {
@@ -47,18 +46,6 @@
     const props = args[1];
     if (!props || typeof props !== "object") return;
     const avatar = hasAvatarUrl(props);
-    if (avatar) {
-      try {
-        const st0 = flat(props.style);
-        const key = st0.width + "x" + st0.height;
-        if (!seen[key] && Object.keys(seen).length < 8) {
-          seen[key] = new Error().stack
-            .split("\n").slice(2, 10)
-            .map((l) => ((l.match(/at\s+([^\s(]+)/) || [0, l.trim()])[1]).slice(0, 40))
-            .join(" < ");
-        }
-      } catch {}
-    }
     if (avatar || isRoundBox(props)) {
       const np = { ...props, style: [props.style, ZERO] };
       if (avatar || "borderRadius" in props) np.borderRadius = 0;
@@ -119,9 +106,8 @@
   }
 
 
-  // ---- diagnostic: look at what JS hands to the native chat list ----
-  const rowSamples = {};
-  let chatMethods = [];
+  // ---- diagnostic: how does JS feed the chat list? ----
+  const info = { rows: {} };
   function describe(v, d) {
     if (v === null) return "null";
     if (typeof v === "string") return "s";
@@ -135,27 +121,46 @@
     }
     return typeof v;
   }
-  function watchRows(args) {
-    try {
-      for (const a of args) {
-        if (typeof a !== "string" || a.charAt(0) !== "[") continue;
-        const rows = JSON.parse(a);
-        for (const r of rows) {
-          const t = String(r && r.type);
-          if (!rowSamples[t] && Object.keys(rowSamples).length < 3) rowSamples[t] = describe(r, 0);
-        }
-      }
-    } catch {}
-  }
   function setupChatWatch() {
     try {
-      const m = ReactNative.NativeModules.DCDChatManager;
-      if (!m) { chatMethods = ["no DCDChatManager"]; return; }
-      chatMethods = Object.keys(m).slice(0, 30);
-      for (const name of ["updateRows", "createRows"]) {
-        if (typeof m[name] === "function") unpatches.push(before(name, m, (args) => { watchRows(args); }));
+      let nm = null;
+      try { nm = ReactNative.NativeModules.DCDChatManager; } catch {}
+      let viaProxy = null;
+      try { viaProxy = globalThis.nativeModuleProxy && globalThis.nativeModuleProxy.DCDChatManager; } catch {}
+      info.native = { nm: !!nm, proxy: !!viaProxy };
+      const m = nm || viaProxy;
+      if (m) {
+        try { info.nativeMethods = Object.getOwnPropertyNames(m).slice(0, 30); } catch {}
+        for (const name of ["updateRows", "createRows"]) {
+          try {
+            if (typeof m[name] === "function") unpatches.push(before(name, m, (args) => {
+              for (const a of args) {
+                if (typeof a !== "string" || a.charAt(0) !== "[") continue;
+                try {
+                  for (const r of JSON.parse(a)) {
+                    const t = "native:" + String(r && r.type);
+                    if (!info.rows[t] && Object.keys(info.rows).length < 3) info.rows[t] = describe(r, 0);
+                  }
+                } catch {}
+              }
+            }));
+          } catch {}
+        }
       }
-    } catch (e) { chatMethods = ["err " + String(e).slice(0, 60)]; }
+    } catch (e) { info.nativeErr = String(e).slice(0, 60); }
+    try {
+      const RM = findByName("RowManager");
+      if (!RM || !RM.prototype) { info.rowManager = "not found"; return; }
+      info.rowManager = Object.getOwnPropertyNames(RM.prototype).slice(0, 20);
+      if (typeof RM.prototype.generate === "function") {
+        unpatches.push(after("generate", RM.prototype, (_a, ret) => {
+          try {
+            const t = "js:" + String(ret && ret.type);
+            if (!info.rows[t] && Object.keys(info.rows).length < 4) info.rows[t] = describe(ret, 0);
+          } catch {}
+        }));
+      }
+    } catch (e) { info.rowManager = "err " + String(e).slice(0, 60); }
   }
 
   return {
@@ -169,7 +174,7 @@
       setupChatWatch();
       try { vendetta.ui.toasts.showToast("Square Avatars: open a chat, wait 15s"); } catch {}
       timer = setTimeout(() => {
-        const report = JSON.stringify({ chatMethods, rowSamples, seen }).slice(0, 3800);
+        const report = JSON.stringify(info).slice(0, 3800);
         try {
           findByProps("setString").setString(report);
           vendetta.ui.toasts.showToast("Report copied. Paste it to Claude");
